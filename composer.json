@@ -1,6 +1,6 @@
 {
   "name": "sugarcommerce/object-storage",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A small client for one S3-compatible bucket — R2, S3, B2, MinIO: multipart uploads the browser does directly, ranged reads, the real stored size, presigned downloads and the bucket's CORS policy. Built on sugarcommerce/s3-signer and sugarcommerce/http-client.",
   "type": "library",
   "license": "GPL-2.0-or-later",

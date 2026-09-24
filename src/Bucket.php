@@ -39,13 +39,13 @@ final readonly class Bucket {
 	/**
 	 * The smallest part S3 accepts, except for the last.
 	 */
-	public const PART_MIN = 5 * 1024 * 1024;
+	public const int PART_MIN = 5 * 1024 * 1024;
 
 	/**
 	 * Parts per upload, with headroom under S3's 10,000 so a miscounted
 	 * final part cannot push a large upload over.
 	 */
-	public const PART_LIMIT = 9_000;
+	public const int PART_LIMIT = 9_000;
 
 	/**
 	 * @param Signer $signer Presigner for the provider.
@@ -88,6 +88,7 @@ final readonly class Bucket {
 	 *
 	 * @return string|null The upload id, or null when storage refused.
 	 */
+	#[\NoDiscard( 'Null means storage refused to start the upload.' )]
 	public function start_upload( string $key, string $mime_type = 'application/octet-stream' ): ?string {
 		$request  = $this->signer->sign_create_multipart_upload( $this->name, $key, $mime_type );
 		$response = $this->http->post( $request->url, '', $request->headers );
@@ -138,6 +139,7 @@ final readonly class Bucket {
 	 *              document, which is how S3 reports a failure it found
 	 *              after it had started answering.
 	 */
+	#[\NoDiscard( 'False means the upload was not assembled — abort it, or its parts stay and are billed.' )]
 	public function finish_upload( string $key, string $upload_id, array $parts ): bool {
 		if ( array() === $parts ) {
 			return false;
@@ -162,6 +164,7 @@ final readonly class Bucket {
 	 *
 	 * @return bool
 	 */
+	#[\NoDiscard( 'False means the parts are still in storage and still billed.' )]
 	public function abort_upload( string $key, string $upload_id ): bool {
 		$request = $this->signer->sign_abort_multipart_upload( $this->name, $key, $upload_id );
 
@@ -241,6 +244,7 @@ final readonly class Bucket {
 	 *
 	 * @return bool
 	 */
+	#[\NoDiscard( 'False means nothing was stored.' )]
 	public function put( string $key, string $body, string $mime_type = 'application/octet-stream', string $cache_control = '' ): bool {
 		$headers = array( 'content-type' => $mime_type );
 
@@ -271,6 +275,7 @@ final readonly class Bucket {
 	 *
 	 * @return bool True when storage confirmed it.
 	 */
+	#[\NoDiscard( 'False means nothing was copied.' )]
 	public function copy_from( Bucket $source, string $source_key, string $key, string $content_type, string $cache_control = '' ): bool {
 		$request  = $this->signer->sign_copy_object( $source->name, $source_key, $this->name, $key, $content_type, $cache_control );
 		$response = $this->http->request( 'PUT', $request->url, '', $request->headers );
@@ -315,6 +320,7 @@ final readonly class Bucket {
 	 *
 	 * @return bool True when storage confirmed it.
 	 */
+	#[\NoDiscard( 'False means the object may still be there.' )]
 	public function delete( string $key ): bool {
 		$request = $this->signer->sign_delete_object( $this->name, $key );
 
