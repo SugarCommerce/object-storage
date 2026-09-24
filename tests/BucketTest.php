@@ -153,6 +153,21 @@ final class BucketTest extends TestCase {
 		$this->assertFalse( $this->bucket( $http )->copy_from( $source, 'a', 'b', 'audio/wav' ) );
 	}
 
+	/**
+	 * Two page loads in one window, one URL: the second is the browser's
+	 * cached copy, not another read from storage.
+	 */
+	public function test_a_view_url_is_stable_and_cacheable(): void {
+		$bucket = $this->bucket( $this->scripted() );
+		$url    = $bucket->view_url( 'a/b.png', 'image/png', 600 );
+
+		parse_str( (string) parse_url( $url, PHP_URL_QUERY ), $query );
+
+		$this->assertSame( 'private, max-age=600', $query['response-cache-control'] );
+		$this->assertSame( 'image/png', $query['response-content-type'] );
+		$this->assertSame( 0, strtotime( $query['X-Amz-Date'] ) % 600, 'Signed on a window boundary.' );
+	}
+
 	public function test_a_stream_url_plays_rather_than_downloads(): void {
 		$url = $this->bucket( $this->scripted() )->stream_url( 'a/b', 3600, 'audio/mpeg' );
 

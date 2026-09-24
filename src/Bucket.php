@@ -285,6 +285,26 @@ final readonly class Bucket {
 	}
 
 	/**
+	 * A URL that shows an object in the browser and stays the same for a
+	 * window, so a page shown twice in that window is fetched once.
+	 *
+	 * For thumbnails and previews somebody may look at again and again:
+	 * every fetch from storage is a billable read, and a URL that changed on
+	 * every page load would make every one of them a fetch.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param string $key          Object key.
+	 * @param string $content_type What the browser should treat it as.
+	 * @param int    $window       Seconds the URL stays the same. Default an hour.
+	 *
+	 * @return string
+	 */
+	public function view_url( string $key, string $content_type, int $window = 3600 ): string {
+		return $this->signer->presign_cacheable( $this->name, $key, $window, $content_type );
+	}
+
+	/**
 	 * A presigned URL that plays or shows in the browser, rather than
 	 * downloading.
 	 *
