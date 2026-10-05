@@ -14,6 +14,7 @@ namespace SugarCommerce\ObjectStorage;
 
 use SugarCommerce\HttpClient\Client as Http;
 use SugarCommerce\S3Signer\{AddressingStyle, Provider, Signer};
+use SugarCommerce\Sanitize\Input;
 
 /**
  * Class Connection
@@ -268,6 +269,9 @@ final readonly class Connection {
 	/**
 	 * Enough of a value to recognise it, and no more.
 	 *
+	 * The rule is sugarcommerce/sanitize's `Input::mask()`, so a key shown
+	 * here and a key shown anywhere else in an app are cut the same way.
+	 *
 	 * @since 1.3.0
 	 *
 	 * @param string $value Value.
@@ -275,13 +279,7 @@ final readonly class Connection {
 	 * @return string e.g. `med…ia`; four and four of a value of 16 or more.
 	 */
 	public static function mask( #[\SensitiveParameter] string $value ): string {
-		$length = strlen( $value );
-
-		if ( $length <= 6 ) {
-			return substr( $value, 0, 1 ) . '…';
-		}
-
-		return substr( $value, 0, $length >= 16 ? 4 : 3 ) . '…' . substr( $value, $length >= 16 ? -4 : -2 );
+		return Input::mask( $value );
 	}
 
 	/**

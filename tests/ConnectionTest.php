@@ -14,6 +14,7 @@ use PHPUnit\Framework\TestCase;
 use SugarCommerce\HttpClient\Fake;
 use SugarCommerce\ObjectStorage\{Bucket, Connection};
 use SugarCommerce\S3Signer\Provider;
+use SugarCommerce\Sanitize\Input;
 
 /**
  * Class ConnectionTest
@@ -203,6 +204,7 @@ final class ConnectionTest extends TestCase {
 	#[DataProvider( 'masks' )]
 	public function test_a_mask_keeps_only_the_ends( string $value, string $masked ): void {
 		$this->assertSame( $masked, Connection::mask( $value ) );
+		$this->assertSame( Input::mask( $value ), Connection::mask( $value ), 'One rule for masking, in sanitize.' );
 	}
 
 	/**

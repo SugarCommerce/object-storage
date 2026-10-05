@@ -28,7 +28,7 @@ A small client for one S3-compatible bucket — R2, S3, B2, MinIO: multipart upl
 
 ## Requirements
 
-PHP 8.5+, `sugarcommerce/s3-signer`, `sugarcommerce/http-client`
+PHP 8.5+, `sugarcommerce/s3-signer`, `sugarcommerce/http-client`, `sugarcommerce/sanitize` (for `Connection::mask()`, which is `Input::mask()`)
 
 ## Installation
 
