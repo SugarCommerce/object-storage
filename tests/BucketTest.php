@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace SugarCommerce\ObjectStorage\Tests;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use SugarCommerce\HttpClient\{Fake, Response};
 use SugarCommerce\ObjectStorage\{Bucket, StorageError};
@@ -123,6 +124,125 @@ final class BucketTest extends TestCase {
 	public function test_part_size_scales_to_stay_inside_the_limit(): void {
 		$this->assertSame( Bucket::PART_MIN, Bucket::part_size( 1_000 ) );
 		$this->assertLessThanOrEqual( Bucket::PART_LIMIT, (int) ceil( 5e12 / Bucket::part_size( 5_000_000_000_000 ) ) );
+	}
+
+	public function test_part_size_can_have_a_larger_floor_but_never_a_smaller_one(): void {
+		$this->assertSame( 8 * 1024 * 1024, Bucket::part_size( 1_000, 8 * 1024 * 1024 ) );
+		$this->assertSame( Bucket::PART_MIN, Bucket::part_size( 1_000, 1 ) );
+		$this->assertSame( Bucket::part_size( 5_000_000_000_000 ), Bucket::part_size( 5_000_000_000_000, 8 * 1024 * 1024 ), 'The limit still wins for a huge file.' );
+	}
+
+	public function test_a_bucket_knows_its_name(): void {
+		$this->assertSame( 'files', $this->bucket( $this->scripted() )->name() );
+	}
+
+	/* ─── What an unfinished upload holds (1.3.0) ───────────────────── */
+
+	public function test_a_part_listing_is_read_in_order_with_quotes_off(): void {
+		$listing = Bucket::parse_list_parts(
+			'<ListPartsResult><IsTruncated>false</IsTruncated>'
+			. '<Part><PartNumber>2</PartNumber><ETag>&quot;bbb&quot;</ETag><Size>5</Size></Part>'
+			. '<Part><PartNumber>1</PartNumber><ETag>"aaa"</ETag><Size>8</Size></Part>'
+			. '<Part><PartNumber>0</PartNumber><ETag>"nonsense"</ETag><Size>1</Size></Part>'
+			. '</ListPartsResult>'
+		);
+
+		$this->assertSame(
+			array( array( 'PartNumber' => 1, 'ETag' => 'aaa', 'Size' => 8 ), array( 'PartNumber' => 2, 'ETag' => 'bbb', 'Size' => 5 ) ),
+			$listing['parts']
+		);
+		$this->assertFalse( $listing['more'] );
+	}
+
+	/**
+	 * A thousand parts a page: a 20 GB upload is more than one.
+	 */
+	public function test_a_long_listing_is_followed_to_the_end(): void {
+		$http = ( new Fake() )
+			->on( 'GET', '*part-number-marker=1*', new Response( true, 200, '<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>2</PartNumber><ETag>"b"</ETag><Size>1</Size></Part></ListPartsResult>' ) )
+			->on( 'GET', '*', new Response( true, 200, '<ListPartsResult><IsTruncated>true</IsTruncated><NextPartNumberMarker>1</NextPartNumberMarker><Part><PartNumber>1</PartNumber><ETag>"a"</ETag><Size>1</Size></Part></ListPartsResult>' ) );
+
+		$parts = $this->bucket( $http )->parts( 'k', 'u' );
+
+		$this->assertSame( array( 1, 2 ), array_column( (array) $parts, 'PartNumber' ) );
+		$this->assertCount( 2, $http->sent( 'GET' ) );
+	}
+
+	/**
+	 * Gone, or an error document: not a listing of nothing, which would
+	 * resume by sending every part to an upload that no longer exists.
+	 *
+	 * @param Response $answer What storage said.
+	 */
+	#[DataProvider( 'not_listings' )]
+	public function test_an_upload_storage_does_not_have_lists_as_null( Response $answer ): void {
+		$this->assertNull( $this->bucket( $this->scripted( $answer ) )->parts( 'k', 'u' ) );
+	}
+
+	/**
+	 * @return array<string, array{0: Response}>
+	 */
+	public static function not_listings(): array {
+		return array(
+			'no such upload'       => array( new Response( false, 404, '<Error><Code>NoSuchUpload</Code></Error>' ) ),
+			'an error inside 200'  => array( new Response( true, 200, '<Error><Code>InternalError</Code></Error>' ) ),
+		);
+	}
+
+	public function test_a_listing_that_never_ends_is_given_up_on(): void {
+		$http = ( new Fake() )->on( 'GET', '*', static fn ( string $method, string $url ): Response => new Response( true, 200, sprintf(
+			'<ListPartsResult><IsTruncated>true</IsTruncated><NextPartNumberMarker>%d</NextPartNumberMarker></ListPartsResult>',
+			1 + (int) ( preg_match( '/part-number-marker=(\d+)/', $url, $m ) ? $m[1] : 0 )
+		) ) );
+
+		$this->assertNull( $this->bucket( $http )->parts( 'k', 'u' ) );
+		$this->assertCount( 11, $http->sent( 'GET' ) );
+	}
+
+	public function test_the_listing_is_a_signed_request_for_that_upload(): void {
+		$http = $this->scripted( new Response( true, 200, '<ListPartsResult></ListPartsResult>' ) );
+
+		$this->assertSame( array(), $this->bucket( $http )->parts( 'acct_X/live/abc', 'up-9' ) );
+
+		$sent = $http->sent( 'GET' )[0];
+
+		$this->assertStringContainsString( 'uploadId=up-9', $sent['url'] );
+		$this->assertStringStartsWith( 'AWS4-HMAC-SHA256', $sent['headers']['Authorization'] );
+	}
+
+	/* ─── What an object is now (1.3.0) ─────────────────────────────── */
+
+	public function test_stat_reads_the_etag_length_and_time_from_a_ranged_read(): void {
+		$http = $this->scripted( new Response( true, 206, 'x', headers: array(
+			'content-range' => 'bytes 0-0/1234',
+			'etag'          => '"abc"',
+			'last-modified' => 'Mon, 05 Oct 2026 09:00:00 GMT',
+		) ) );
+
+		$this->assertSame(
+			array( 'etag' => 'abc', 'size' => 1234, 'modified' => 'Mon, 05 Oct 2026 09:00:00 GMT' ),
+			$this->bucket( $http )->stat( 'a/b' )
+		);
+		$this->assertSame( 'bytes=0-0', $http->sent( 'GET' )[0]['headers']['Range'] );
+	}
+
+	/**
+	 * @param Response $answer What storage said.
+	 */
+	#[DataProvider( 'unsaid' )]
+	public function test_stat_without_all_of_it_is_unknown( Response $answer ): void {
+		$this->assertNull( $this->bucket( $this->scripted( $answer ) )->stat( 'a/b' ) );
+	}
+
+	/**
+	 * @return array<string, array{0: Response}>
+	 */
+	public static function unsaid(): array {
+		return array(
+			'refused'          => array( new Response( false, 403 ) ),
+			'no content-range' => array( new Response( true, 200, 'whole', headers: array( 'etag' => '"e"' ) ) ),
+			'no etag'          => array( new Response( true, 206, 'x', headers: array( 'content-range' => 'bytes 0-0/9' ) ) ),
+		);
 	}
 
 	public function test_a_download_url_is_presigned(): void {

@@ -48,6 +48,23 @@ final readonly class Bucket {
 	public const int PART_LIMIT = 9_000;
 
 	/**
+	 * Parts ListParts returns in one page, at most.
+	 */
+	private const int PARTS_PAGE = 1000;
+
+	/**
+	 * Pages of parts to follow before giving up: S3 allows 10,000 parts,
+	 * which is ten pages, and a listing still going after that is broken.
+	 */
+	private const int PARTS_PAGES = 11;
+
+	/**
+	 * Most bytes stat() reads. One is asked for; a server that ignores the
+	 * Range header is cut off here rather than read whole.
+	 */
+	private const int STAT_BYTES = 1024;
+
+	/**
 	 * @param Signer $signer Presigner for the provider.
 	 * @param string $name   Bucket name.
 	 * @param Http   $http   HTTP client. Substituted in tests.
@@ -65,13 +82,28 @@ final readonly class Bucket {
 	 * rather than failing at part 10,001 after an hour of uploading.
 	 *
 	 * @since 1.0.0
+	 * @since 1.3.0 Takes a floor.
 	 *
 	 * @param int $bytes File size.
+	 * @param int $floor Smallest part to use, when larger than S3's minimum —
+	 *                   fewer round trips for an uploader that can afford
+	 *                   to retry bigger parts. Never below PART_MIN.
 	 *
 	 * @return int
 	 */
-	public static function part_size( int $bytes ): int {
-		return max( self::PART_MIN, (int) ceil( $bytes / self::PART_LIMIT ) );
+	public static function part_size( int $bytes, int $floor = self::PART_MIN ): int {
+		return max( self::PART_MIN, $floor, (int) ceil( $bytes / self::PART_LIMIT ) );
+	}
+
+	/**
+	 * The bucket's name.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @return string
+	 */
+	public function name(): string {
+		return $this->name;
 	}
 
 	/**
@@ -169,6 +201,123 @@ final readonly class Bucket {
 		$request = $this->signer->sign_abort_multipart_upload( $this->name, $key, $upload_id );
 
 		return $this->http->request( 'DELETE', $request->url, null, $request->headers )->ok;
+	}
+
+	/**
+	 * Every part storage holds for an unfinished upload, in order.
+	 *
+	 * What resuming needs. A browser that reloads halfway through a 6 GB
+	 * upload remembers which parts it sent, but storage decides what counts:
+	 * a part the browser saw finish may not have been kept, and one it never
+	 * heard back about may have been. So the browser's list is a hint and
+	 * this is the answer. Followed page by page, a thousand parts at a time.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param string $key       Object key.
+	 * @param string $upload_id Multipart upload id.
+	 *
+	 * @return array<int, array{PartNumber: int, ETag: string, Size: int}>|null
+	 *         Null when storage would not say — most often because the upload
+	 *         was finished or aborted and no longer exists, which a caller
+	 *         should treat as "start again", not as "nothing sent yet".
+	 */
+	public function parts( string $key, string $upload_id ): ?array {
+		$parts  = array();
+		$marker = 0;
+
+		for ( $page = 0; $page < self::PARTS_PAGES; $page++ ) {
+			$request  = $this->signer->sign_list_parts( $this->name, $key, $upload_id, self::PARTS_PAGE, $marker );
+			$response = $this->http->request( 'GET', $request->url, null, $request->headers );
+
+			// The 200-with-an-error-document case again: an answer is only a
+			// listing if it says it is one.
+			if ( ! $response->ok || ! str_contains( $response->body, '<ListPartsResult' ) ) {
+				return null;
+			}
+
+			$listing = self::parse_list_parts( $response->body );
+			$parts   = array_merge( $parts, $listing['parts'] );
+
+			if ( ! $listing['more'] || $listing['next'] <= $marker ) {
+				return $parts;
+			}
+
+			$marker = $listing['next'];
+		}
+
+		return null;
+	}
+
+	/**
+	 * Read a ListPartsResult document.
+	 *
+	 * Patterns rather than an XML parser, the way an upload id is read: a
+	 * handful of fields, from a contract that has not changed in fifteen
+	 * years, and no entity expansion to think about. ETags come back without
+	 * their quotes, ready to hand to finish_upload().
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param string $xml Response body.
+	 *
+	 * @return array{parts: array<int, array{PartNumber: int, ETag: string, Size: int}>, more: bool, next: int}
+	 *         The parts in order; whether there is another page; the marker
+	 *         to ask for it with.
+	 */
+	public static function parse_list_parts( string $xml ): array {
+		$parts = array();
+
+		preg_match_all( '#<Part>(.*?)</Part>#s', $xml, $blocks );
+
+		foreach ( $blocks[1] as $block ) {
+			$number = (int) self::field( $block, 'PartNumber' );
+			$etag   = trim( html_entity_decode( self::field( $block, 'ETag' ), ENT_QUOTES | ENT_XML1 ), '"' );
+
+			if ( $number >= 1 && '' !== $etag ) {
+				$parts[] = array( 'PartNumber' => $number, 'ETag' => $etag, 'Size' => (int) self::field( $block, 'Size' ) );
+			}
+		}
+
+		usort( $parts, static fn ( array $a, array $b ): int => $a['PartNumber'] <=> $b['PartNumber'] );
+
+		return array(
+			'parts' => $parts,
+			'more'  => 'true' === strtolower( self::field( $xml, 'IsTruncated' ) ),
+			'next'  => (int) self::field( $xml, 'NextPartNumberMarker' ),
+		);
+	}
+
+	/**
+	 * What the bucket says about an object now: its ETag, whole length and
+	 * last modification.
+	 *
+	 * A one-byte ranged read of a presigned URL — the URL is signed for GET,
+	 * so a HEAD would not verify — whose headers carry all three. For telling
+	 * whether an object somebody else can write to is still the one you
+	 * checked: an overwrite changes the length or the time whatever it does
+	 * to the ETag, so a crafted ETag collision does not pass for the same
+	 * object.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param string $key Object key.
+	 *
+	 * @return array{etag: string, size: int, modified: string}|null Null when
+	 *         storage would not answer, or did not say all of it: without a
+	 *         Content-Range there is no length, and without an ETag nothing
+	 *         to compare.
+	 */
+	public function stat( string $key ): ?array {
+		$response = $this->http->with_max_bytes( self::STAT_BYTES )->get( $this->url( $key, 60 ), array( 'Range' => 'bytes=0-0' ) );
+
+		if ( ! $response->ok || 1 !== preg_match( '#/(\d+)$#', (string) $response->header( 'content-range' ), $total ) ) {
+			return null;
+		}
+
+		$etag = trim( (string) $response->header( 'etag' ), "\" \t" );
+
+		return '' === $etag ? null : array( 'etag' => $etag, 'size' => (int) $total[1], 'modified' => (string) $response->header( 'last-modified' ) );
 	}
 
 	/**
@@ -436,5 +585,17 @@ final readonly class Bucket {
 	 */
 	private static function describe( int $status, string $body ): string {
 		return 'HTTP ' . $status . ': ' . substr( strip_tags( $body ), 0, 160 );
+	}
+
+	/**
+	 * The text of the first element with this name, or ''.
+	 *
+	 * @param string $xml  Document or fragment.
+	 * @param string $name Element name.
+	 *
+	 * @return string
+	 */
+	private static function field( string $xml, string $name ): string {
+		return 1 === preg_match( '#<' . $name . '>([^<]*)</' . $name . '>#', $xml, $match ) ? $match[1] : '';
 	}
 }
