@@ -295,4 +295,99 @@ final class BucketTest extends TestCase {
 		$this->assertStringContainsString( 'response-content-disposition=inline', $url );
 		$this->assertStringStartsWith( $this->bucket( $this->scripted() )->origin(), $url );
 	}
+
+	/* ─── A file from disk (1.3.0) ──────────────────────────────────── */
+
+	/**
+	 * A file on disk of a given size.
+	 *
+	 * @param int $bytes Its length.
+	 *
+	 * @return string Its path, removed after the test.
+	 */
+	private function file( int $bytes ): string {
+		$path = (string) tempnam( sys_get_temp_dir(), 'os' );
+
+		file_put_contents( $path, str_repeat( 'b', $bytes ) );
+		register_shutdown_function( static fn () => @unlink( $path ) );
+
+		return $path;
+	}
+
+	/**
+	 * A storage that starts uploads, takes parts with an ETag each, and
+	 * completes them.
+	 *
+	 * @param Response|null $part What a part PUT gets, when not the usual.
+	 */
+	private function multipart( ?Response $part = null ): Fake {
+		return ( new Fake( new Response( true, 204 ) ) )
+			->on( 'POST', '*?uploads*', new Response( true, 200, '<InitiateMultipartUploadResult><UploadId>up-1</UploadId></InitiateMultipartUploadResult>' ) )
+			->on( 'POST', '*uploadId=*', new Response( true, 200, '<CompleteMultipartUploadResult/>' ) )
+			->on( 'PUT', '*partNumber=*', $part ?? static fn ( string $method, string $url ): Response => new Response( true, 200, headers: array(
+				'etag' => '"e' . ( preg_match( '/partNumber=(\d+)/', $url, $m ) ? $m[1] : '' ) . '"',
+			) ) );
+	}
+
+	public function test_a_small_file_goes_up_in_one_put(): void {
+		$http = $this->multipart();
+
+		$this->assertTrue( $this->bucket( $http )->upload_file( 'backups/a.db', $this->file( 1000 ) ) );
+		$this->assertSame( array( 'PUT' ), $http->methods() );
+		$this->assertSame( 1000, strlen( (string) $http->sent( 'PUT' )[0]['body'] ) );
+	}
+
+	/**
+	 * Bigger than a part: started, sent a part at a time, and assembled
+	 * from the ETags each part came back with.
+	 */
+	public function test_a_large_file_is_sent_in_parts(): void {
+		$http = $this->multipart();
+
+		$this->assertTrue( $this->bucket( $http )->upload_file( 'backups/a.db', $this->file( Bucket::PART_MIN + 10 ), 'application/vnd.sqlite3' ) );
+		$this->assertSame( array( 'POST', 'PUT', 'PUT', 'POST' ), $http->methods() );
+
+		$parts = $http->sent( 'PUT' );
+
+		$this->assertSame( Bucket::PART_MIN, strlen( (string) $parts[0]['body'] ) );
+		$this->assertSame( 10, strlen( (string) $parts[1]['body'] ) );
+		$this->assertStringContainsString( 'partNumber=2', $parts[1]['url'] );
+
+		$complete = (string) $http->sent( 'POST', '*uploadId=up-1*' )[0]['body'];
+
+		$this->assertStringContainsString( '<PartNumber>1</PartNumber><ETag>&quot;e1&quot;</ETag>', $complete );
+		$this->assertStringContainsString( '<PartNumber>2</PartNumber><ETag>&quot;e2&quot;</ETag>', $complete );
+	}
+
+	/**
+	 * A refused part leaves an upload whose parts are billed until it is
+	 * aborted, so it is.
+	 *
+	 * @param Response $part What a part PUT gets.
+	 */
+	#[DataProvider( 'refused_parts' )]
+	public function test_a_refused_part_aborts_the_upload( Response $part ): void {
+		$http = $this->multipart( $part );
+
+		$this->assertFalse( $this->bucket( $http )->upload_file( 'k', $this->file( Bucket::PART_MIN + 1 ) ) );
+		$this->assertCount( 1, $http->sent( 'DELETE', '*uploadId=up-1*' ) );
+		$this->assertCount( 1, $http->sent( 'PUT' ), 'Nothing more is sent after a refusal.' );
+	}
+
+	/**
+	 * @return array<string, array{0: Response}>
+	 */
+	public static function refused_parts(): array {
+		return array(
+			'refused'      => array( new Response( false, 403 ) ),
+			'with no etag' => array( new Response( true, 200 ) ),
+		);
+	}
+
+	public function test_a_file_that_is_not_there_sends_nothing(): void {
+		$http = $this->multipart();
+
+		$this->assertFalse( $this->bucket( $http )->upload_file( 'k', '/nonexistent/' . bin2hex( random_bytes( 4 ) ) ) );
+		$this->assertSame( array(), $http->methods() );
+	}
 }

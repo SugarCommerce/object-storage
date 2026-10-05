@@ -14,6 +14,7 @@ A small client for one S3-compatible bucket — R2, S3, B2, MinIO: multipart upl
 ## Features
 
 - 📤 **Browser-direct multipart** — start, sign parts in batches, finish, abort.
+- 🗄️ **Big files from the server** — `upload_file()` sends a file from disk a part at a time, and aborts what it started if a part is refused.
 - ⏯️ **Resuming** — `parts()` asks storage which parts it really kept (ListParts, every page), rather than trusting the browser's memory.
 - 🔎 **Has it changed?** — `stat()` reads an object's ETag, length and modification time from a one-byte read, for objects somebody else can overwrite.
 - 🔑 **Bring-your-own buckets** — `Connection` takes a user's provider, region and keys, refuses any host that is not the provider's own, and only ever shows itself masked.
@@ -63,6 +64,16 @@ The HTTP client's SSRF guard is for URLs users supply. A bucket endpoint is your
 $public->copy_from( $private, $key, 'previews/' . $key, 'audio/mpeg', 'public, max-age=31536000, immutable' );
 $public->put( 'previews/' . $sha . '.json', $peaks, 'application/json', 'public, max-age=31536000, immutable' );
 ```
+
+### A file from disk
+
+```php
+if ( ! $bucket->upload_file( 'backups/' . basename( $path ), $path, 'application/vnd.sqlite3' ) ) {
+    // nothing is left behind: a refused part aborts the upload
+}
+```
+
+For what the server itself has to send and cannot hold — a database backup, an export. A file smaller than a part goes in one `put()`; anything larger is a multipart upload from the server, one part in memory at a time, sized by `part_size()`. A part refused, or returned without an ETag, aborts the upload, because its parts would otherwise be billed until a lifecycle rule found them.
 
 ### Resuming an upload
 
@@ -137,7 +148,7 @@ composer install
 composer test
 ```
 
-86 tests, every one against `sugarcommerce/http-client`'s `Fake`, so nothing reaches a bucket: multipart start, sign, finish (including the error inside a 200), abort, ListParts paging and its dead ends, ranged reads, sizes, `stat()`, CORS, copies, view and stream URLs, `Connection` validation, storage and masking, and every `Probe` step and fault. `MustCheckTest` keeps `#[\NoDiscard]` on the results that must be checked.
+92 tests, every one against `sugarcommerce/http-client`'s `Fake`, so nothing reaches a bucket: multipart start, sign, finish (including the error inside a 200), abort, server-side `upload_file()` in one PUT or in parts, ListParts paging and its dead ends, ranged reads, sizes, `stat()`, CORS, copies, view and stream URLs, `Connection` validation, storage and masking, and every `Probe` step and fault. `MustCheckTest` keeps `#[\NoDiscard]` on the results that must be checked.
 
 ## License
 

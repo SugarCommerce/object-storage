@@ -407,6 +407,94 @@ final readonly class Bucket {
 	}
 
 	/**
+	 * Write a file from disk, a part at a time.
+	 *
+	 * For what is too big to hold in memory and too big for one PUT — a
+	 * database backup, an export. A file smaller than a part goes up in one
+	 * put(); anything larger is a multipart upload from this server, one
+	 * part in memory at a time, sized by part_size(). A part refused, or an
+	 * assembly that fails, aborts the upload: its parts would otherwise stay
+	 * in the bucket, and be billed, until a lifecycle rule found them.
+	 *
+	 * @since 1.3.0
+	 *
+	 * @param string $key       Object key.
+	 * @param string $path      Local file to send.
+	 * @param string $mime_type Content-Type to store.
+	 *
+	 * @return bool True when storage holds the whole file.
+	 */
+	#[\NoDiscard( 'False means nothing was stored.' )]
+	public function upload_file( string $key, string $path, string $mime_type = 'application/octet-stream' ): bool {
+		$bytes  = is_file( $path ) ? (int) filesize( $path ) : -1;
+		$handle = $bytes >= 0 ? fopen( $path, 'rb' ) : false;
+
+		if ( false === $handle ) {
+			return false;
+		}
+
+		try {
+			$part_size = self::part_size( $bytes );
+
+			if ( $bytes <= $part_size ) {
+				return $this->put( $key, (string) stream_get_contents( $handle ), $mime_type );
+			}
+
+			$upload_id = $this->start_upload( $key, $mime_type );
+
+			if ( null === $upload_id ) {
+				return false;
+			}
+
+			$parts = $this->send_parts( $key, $upload_id, $handle, $part_size );
+
+			if ( null !== $parts && $this->finish_upload( $key, $upload_id, $parts ) ) {
+				return true;
+			}
+
+			(void) $this->abort_upload( $key, $upload_id );
+
+			return false;
+		} finally {
+			fclose( $handle );
+		}
+	}
+
+	/**
+	 * PUT every part of an open file to an upload, in order.
+	 *
+	 * @param string   $key       Object key.
+	 * @param string   $upload_id Multipart upload id.
+	 * @param resource $handle    The file, at its start.
+	 * @param int      $part_size Bytes per part.
+	 *
+	 * @return array<int, array{PartNumber: int, ETag: string}>|null Null when
+	 *         a part was refused or came back without an ETag.
+	 */
+	private function send_parts( string $key, string $upload_id, $handle, int $part_size ): ?array {
+		$parts = array();
+
+		for ( $number = 1; ! feof( $handle ); $number++ ) {
+			$chunk = (string) stream_get_contents( $handle, $part_size );
+
+			if ( '' === $chunk ) {
+				break;
+			}
+
+			$response = $this->http->put( $this->signer->presign_upload_part( $this->name, $key, $upload_id, $number ), $chunk );
+			$etag     = trim( (string) $response->header( 'etag' ), '"' );
+
+			if ( ! $response->ok || '' === $etag ) {
+				return null;
+			}
+
+			$parts[] = array( 'PartNumber' => $number, 'ETag' => $etag );
+		}
+
+		return $parts;
+	}
+
+	/**
 	 * Copy an object from another bucket into this one, inside storage.
 	 *
 	 * Nothing passes through PHP, whatever the size. Both buckets must be
