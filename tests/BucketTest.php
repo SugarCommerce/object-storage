@@ -38,8 +38,24 @@ final class BucketTest extends TestCase {
 		$this->assertSame( 'POST', $http->requests[0]['method'] );
 	}
 
-	public function test_a_refused_start_has_no_id(): void {
-		$this->assertNull( $this->bucket( $this->scripted( new Response( false, 403 ) ) )->start_upload( 'a/b' ) );
+	public function test_a_refused_start_says_why(): void {
+		$refusal = '<?xml version="1.0" encoding="UTF-8"?><Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message></Error>';
+
+		try {
+			(void) $this->bucket( $this->scripted( new Response( false, 403, $refusal ) ) )->start_upload( 'a/b' );
+			$this->fail( 'A refused start must throw.' );
+		} catch ( StorageError $e ) {
+			$this->assertSame( 'start_upload', $e->operation );
+			$this->assertSame( 403, $e->status );
+			$this->assertSame( 'SignatureDoesNotMatch', $e->error_code );
+			$this->assertStringContainsString( 'SignatureDoesNotMatch: The request signature', $e->getMessage() );
+		}
+	}
+
+	public function test_a_start_answered_without_an_id_failed(): void {
+		$this->expectException( StorageError::class );
+
+		(void) $this->bucket( $this->scripted( new Response( true, 200, '<InitiateMultipartUploadResult/>' ) ) )->start_upload( 'a/b' );
 	}
 
 	public function test_part_numbers_out_of_range_are_not_signed(): void {

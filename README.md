@@ -39,12 +39,18 @@ composer require sugarcommerce/object-storage
 ## Usage
 
 ```php
-use SugarCommerce\ObjectStorage\Bucket;
+use SugarCommerce\ObjectStorage\{Bucket, StorageError};
 use SugarCommerce\S3Signer\Provider;
 
 $bucket = new Bucket( Provider::R2->signer( $key, $secret, 'auto', $account_id, '' ), 'files' );
 
-$upload = $bucket->start_upload( $object_key );
+try {
+    $upload = $bucket->start_upload( $object_key );
+} catch ( StorageError $e ) {
+    error_log( $e->getMessage() ); // "Storage start_upload failed (403): SignatureDoesNotMatch: …"
+    return;                        // $e->error_code says which fix: a rolled secret, a revoked key, no bucket
+}
+
 $urls   = $bucket->sign_parts( $object_key, $upload, range( 1, $parts ) ); // hand to the browser
 
 if ( ! $bucket->finish_upload( $object_key, $upload, $etags ) ) {

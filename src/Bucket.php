@@ -115,21 +115,37 @@ final readonly class Bucket {
 	 *
 	 * @since 1.0.0
 	 *
+	 * Throws rather than answering null, because why it was refused is the
+	 * whole question afterwards: a rolled secret (SignatureDoesNotMatch), a
+	 * revoked key (InvalidAccessKeyId) or a missing bucket (NoSuchBucket)
+	 * are three different fixes, and a null was the same for all of them.
+	 *
+	 * @since 1.0.0
+	 * @since 2.0.0 Throws StorageError instead of returning null.
+	 *
 	 * @param string $key       Object key.
 	 * @param string $mime_type Content-Type to store.
 	 *
-	 * @return string|null The upload id, or null when storage refused.
+	 * @return string The upload id.
+	 *
+	 * @throws StorageError When storage refuses, with its status and error code.
 	 */
-	#[\NoDiscard( 'Null means storage refused to start the upload.' )]
-	public function start_upload( string $key, string $mime_type = 'application/octet-stream' ): ?string {
+	#[\NoDiscard( 'Every part needs the upload id.' )]
+	public function start_upload( string $key, string $mime_type = 'application/octet-stream' ): string {
 		$request  = $this->signer->sign_create_multipart_upload( $this->name, $key, $mime_type );
 		$response = $this->http->post( $request->url, '', $request->headers );
 
 		if ( ! $response->ok ) {
-			return null;
+			throw StorageError::refused( 'start_upload', $response->status, '' !== $response->body ? $response->body : $response->error );
 		}
 
-		return 1 === preg_match( '#<UploadId>([^<]+)</UploadId>#', $response->body, $matches ) ? $matches[1] : null;
+		$upload_id = self::field( $response->body, 'UploadId' );
+
+		if ( '' === $upload_id ) {
+			throw StorageError::refused( 'start_upload', $response->status, $response->body );
+		}
+
+		return $upload_id;
 	}
 
 	/**
@@ -440,9 +456,9 @@ final readonly class Bucket {
 				return $this->put( $key, (string) stream_get_contents( $handle ), $mime_type );
 			}
 
-			$upload_id = $this->start_upload( $key, $mime_type );
-
-			if ( null === $upload_id ) {
+			try {
+				$upload_id = $this->start_upload( $key, $mime_type );
+			} catch ( StorageError ) {
 				return false;
 			}
 
