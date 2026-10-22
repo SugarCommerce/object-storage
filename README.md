@@ -62,6 +62,8 @@ $head = $bucket->read( $object_key, 0, 65535 );       // for an inspection
 $url  = $bucket->url( $object_key, 300, 'Master.wav' );
 ```
 
+`read()` and `size()` never take in more than they asked for: a backwards or negative range is refused before any request (storage answers a range it cannot parse with the whole object), and the answer is cut off in transit past the range — or past 1 KiB for `size()` — rather than read whole into memory. `json_encode()` of a `Connection` gives its masked view, like `var_dump()`; `to_json()` is the only way to the secret.
+
 The HTTP client's SSRF guard is for URLs users supply. A bucket endpoint is your configuration and may be a MinIO on localhost — pass `new Client()->without_ssrf()` if so.
 
 ### Publishing a copy

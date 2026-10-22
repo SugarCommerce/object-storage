@@ -18,10 +18,14 @@ namespace SugarCommerce\ObjectStorage;
  * Thrown where an empty answer and no answer would look the same afterwards —
  * reading bytes back, where '' is also what an empty file returns — and where
  * why storage said no is what someone has to know next, starting an upload.
+ *
+ * @since 1.0.0
  */
 final class StorageError extends \RuntimeException {
 
 	/**
+	 * @since 1.0.0
+	 *
 	 * @param string $operation  What was being done, e.g. "read".
 	 * @param int    $status     HTTP status, 0 when nothing answered.
 	 * @param string $detail     Start of the response, for the log.

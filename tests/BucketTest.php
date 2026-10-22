@@ -102,6 +102,35 @@ final class BucketTest extends TestCase {
 	}
 
 	/**
+	 * Storage answers a range it cannot parse with the whole object, so a
+	 * backwards range from a browser's Range header would read all of it.
+	 */
+	#[DataProvider( 'not_ranges' )]
+	public function test_a_range_that_is_not_one_is_refused_before_asking( int $from, int $to ): void {
+		$http = $this->scripted();
+
+		try {
+			$this->bucket( $http )->read( 'a/b', $from, $to );
+			$this->fail( 'A backwards or negative range was read.' );
+		} catch ( \InvalidArgumentException ) {
+			$this->assertSame( array(), $http->requests->getArrayCopy() );
+		}
+	}
+
+	/** @return array<string, array{0: int, 1: int}> */
+	public static function not_ranges(): array {
+		return array(
+			'backwards' => array( 10, 5 ),
+			'negative'  => array( -1, 5 ),
+			'overflows' => array( 0, PHP_INT_MAX ),
+		);
+	}
+
+	public function test_a_read_whose_range_was_ignored_is_cut_to_the_range(): void {
+		$this->assertSame( 'cde', $this->bucket( $this->scripted( new Response( true, 200, 'abcdefgh' ) ) )->read( 'a/b', 2, 4 ) );
+	}
+
+		/**
 	 * A browser's declared size is a claim; this is the bucket's answer.
 	 */
 	public function test_the_size_comes_from_the_content_range(): void {

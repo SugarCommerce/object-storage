@@ -225,4 +225,19 @@ final class ConnectionTest extends TestCase {
 		$this->assertStringNotContainsString( self::TYPED['secret_key'], print_r( self::typed(), true ) );
 		$this->assertStringNotContainsString( self::TYPED['secret_key'], var_export( self::typed()->masked(), true ) );
 	}
+
+	/**
+	 * json_encode() of an object writes its public properties, and the
+	 * secret is one of them.
+	 */
+	public function test_json_encoding_the_object_does_not_show_the_secret(): void {
+		$encoded = (string) json_encode( self::typed() );
+
+		$this->assertStringNotContainsString( self::TYPED['secret_key'], $encoded );
+		$this->assertStringNotContainsString( self::TYPED['access_key'], $encoded );
+	}
+
+	public function test_a_json_list_is_not_a_connection(): void {
+		$this->assertNull( Connection::from_json( '["r2","bucket"]' ) );
+	}
 }

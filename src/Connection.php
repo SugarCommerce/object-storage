@@ -36,11 +36,12 @@ use SugarCommerce\Sanitize\Input;
  * can never be a Connection; for your own MinIO, build a Bucket directly.
  *
  * Shown only through masked(), so a page that saved the keys never gets them
- * back, and kept out of var_dump() and print_r() the same way.
+ * back, and kept out of var_dump(), print_r() and json_encode() the same way.
+ * to_json() is the one way to the secret, for storing it sealed.
  *
  * @since 1.3.0
  */
-final readonly class Connection {
+final readonly class Connection implements \JsonSerializable {
 
 	/**
 	 * Providers whose endpoint is built rather than typed: every one a
@@ -127,7 +128,9 @@ final readonly class Connection {
 			return null;
 		}
 
-		$connection = self::from_array( $data, $providers );
+		// A JSON list, or an object with numeric names, decodes to integer
+		// keys, and none of those is a field.
+		$connection = self::from_array( array_filter( $data, 'is_string', ARRAY_FILTER_USE_KEY ), $providers );
 
 		return $connection instanceof self ? $connection : null;
 	}
@@ -288,14 +291,32 @@ final readonly class Connection {
 	 *
 	 * @since 1.3.0
 	 *
-	 * @return array<string, string>
+	 * @return array{provider: string, label: string, bucket: string, host: string, region: string, access_key: string}
 	 */
 	public function __debugInfo(): array {
 		return $this->masked();
 	}
 
 	/**
+	 * What json_encode() writes: the masked view, never the keys.
+	 *
+	 * The properties are public, and json_encode() of an object writes its
+	 * public properties — the secret among them — into whatever API answer or
+	 * log line the connection was handed to.
+	 *
+	 * @since 2.1.0
+	 *
+	 * @return array{provider: string, label: string, bucket: string, host: string, region: string, access_key: string}
+	 */
+	#[\Override]
+	public function jsonSerialize(): array {
+		return $this->masked();
+	}
+
+	/**
 	 * A host with its first label masked: the account id.
+	 *
+	 * @since 1.3.0
 	 *
 	 * @param string $host Host.
 	 *

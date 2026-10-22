@@ -33,6 +33,8 @@ use SugarCommerce\S3Signer\{Method, Signer};
  * The HTTP client's SSRF guard is for URLs a user supplied. A bucket
  * endpoint is operator configuration — and may legitimately be a MinIO on
  * localhost — so pass a client with `without_ssrf()` if yours is one.
+ *
+ * @since 1.0.0
  */
 final readonly class Bucket {
 
@@ -65,6 +67,8 @@ final readonly class Bucket {
 	private const int STAT_BYTES = 1024;
 
 	/**
+	 * @since 1.0.0
+	 *
 	 * @param Signer $signer Presigner for the provider.
 	 * @param string $name   Bucket name.
 	 * @param Http   $http   HTTP client. Substituted in tests.
@@ -112,8 +116,6 @@ final readonly class Bucket {
 	 * Server-side, because the id only exists once storage has answered and
 	 * every part needs it. Parsed with a pattern rather than an XML parser:
 	 * one field, from a contract that has not changed in fifteen years.
-	 *
-	 * @since 1.0.0
 	 *
 	 * Throws rather than answering null, because why it was refused is the
 	 * whole question afterwards: a rolled secret (SignatureDoesNotMatch), a
@@ -325,7 +327,7 @@ final readonly class Bucket {
 	 *         to compare.
 	 */
 	public function stat( string $key ): ?array {
-		$response = $this->http->with_max_bytes( self::STAT_BYTES )->get( $this->url( $key, 60 ), array( 'Range' => 'bytes=0-0' ) );
+		$response = $this->capped( self::STAT_BYTES )->get( $this->url( $key, 60 ), array( 'Range' => 'bytes=0-0' ) );
 
 		if ( ! $response->ok || 1 !== preg_match( '#/(\d+)$#', (string) $response->header( 'content-range' ), $total ) ) {
 			return null;
@@ -340,24 +342,46 @@ final readonly class Bucket {
 	 * Some bytes of an object.
 	 *
 	 * @since 1.0.0
+	 * @since 2.1.0 Reads no more than the range, whatever storage sends.
 	 *
 	 * @param string $key  Object key.
 	 * @param int    $from First byte.
 	 * @param int    $to   Last byte, inclusive.
 	 *
-	 * @return string
+	 * @return string The range. Storage sending more than it is cut off in
+	 *                transit, and that is a StorageError.
 	 *
 	 * @throws StorageError When storage does not answer. An empty read and an
 	 *                      empty file look the same afterwards, and only one
 	 *                      of them should be waved through.
+	 * @throws \InvalidArgumentException On a range that is not one: a negative
+	 *                                   start, or an end before the start.
 	 */
 	public function read( string $key, int $from, int $to ): string {
-		$response = $this->http->get( $this->url( $key, 60 ), array( 'Range' => sprintf( 'bytes=%d-%d', $from, $to ) ) );
+		// Storage answers a range it cannot make sense of with the whole
+		// object. `bytes=10-5` from a browser's Range header would otherwise
+		// pull a 6 GB file into memory to return none of it.
+		if ( $from < 0 || $to < $from || PHP_INT_MAX === $to - $from ) {
+			throw new \InvalidArgumentException( sprintf( 'Not a byte range: %d-%d.', $from, $to ) );
+		}
+
+		$length   = $to - $from + 1;
+		$response = $this->capped( $length )->get( $this->url( $key, 60 ), array( 'Range' => sprintf( 'bytes=%d-%d', $from, $to ) ) );
 
 		if ( ! $response->ok ) {
 			throw new StorageError( 'read', $response->status, $response->body );
 		}
 
+		// A 200 is the whole object, the range ignored: small enough to have
+		// come in under the cap, so the range is cut from it here.
+		if ( 200 === $response->status ) {
+			return substr( $response->body, $from, $length );
+		}
+
+		// A 206 is returned as storage sent it. More than the range cannot
+		// arrive through a client that enforces the cap; through one that
+		// does not, a caller checking the length sees a server that got the
+		// range wrong rather than a quietly trimmed answer.
 		return $response->body;
 	}
 
@@ -369,13 +393,16 @@ final readonly class Bucket {
 	 * it cannot be reused for a HEAD.
 	 *
 	 * @since 1.0.0
+	 * @since 2.1.0 Reads at most STAT_BYTES.
 	 *
 	 * @param string $key Object key.
 	 *
-	 * @return int|null Bytes, or null when storage would not say.
+	 * @return int|null Bytes, or null when storage would not say — including
+	 *                  when it ignored the range for an object bigger than
+	 *                  STAT_BYTES, which is cut off rather than read whole.
 	 */
 	public function size( string $key ): ?int {
-		$response = $this->http->get( $this->url( $key, 60 ), array( 'Range' => 'bytes=0-0' ) );
+		$response = $this->capped( self::STAT_BYTES )->get( $this->url( $key, 60 ), array( 'Range' => 'bytes=0-0' ) );
 
 		if ( ! $response->ok ) {
 			return null;
@@ -677,6 +704,21 @@ final readonly class Bucket {
 		return $response->ok
 			? array( 'ok' => true, 'error' => '' )
 			: array( 'ok' => false, 'error' => self::describe( $response->status, $response->body ) );
+	}
+
+	/**
+	 * The HTTP client, refusing answers longer than a number of bytes.
+	 *
+	 * A client that already has a smaller cap keeps it.
+	 *
+	 * @since 2.1.0
+	 *
+	 * @param int $bytes Most bytes to accept.
+	 *
+	 * @return Http
+	 */
+	private function capped( int $bytes ): Http {
+		return $this->http->max_bytes > 0 && $this->http->max_bytes <= $bytes ? $this->http : $this->http->with_max_bytes( $bytes );
 	}
 
 	/**

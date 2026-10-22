@@ -96,8 +96,8 @@ final readonly class Probe {
 	 * @param array<int, string> $origins    Origins a browser uploader runs on.
 	 *                                       None skips the CORS question.
 	 *
-	 * @return array<int, ProbeStep> One per ProbeCheck, in order. After the
-	 *                               first failure the rest are Skipped.
+	 * @return list<ProbeStep> One per ProbeCheck, in order. After the first
+	 *                         failure the rest are Skipped.
 	 */
 	public function run( Connection $connection, array $origins = array() ): array {
 		$signer  = $connection->signer();
@@ -235,7 +235,7 @@ final readonly class Probe {
 	 * @param Connection         $connection The bucket.
 	 * @param Signer             $signer     Signer.
 	 * @param string             $key        Test object key.
-	 * @param array<int, string> $origins    Origins the uploader runs on.
+	 * @param list<string>       $origins    Origins the uploader runs on.
 	 * @param Response|null      $put        The answer to the test write.
 	 *
 	 * @return ProbeStep
