@@ -32,8 +32,14 @@ use SugarCommerce\Sanitize\Input;
  * scanner one file and everybody else another, by address. So there is no
  * endpoint field at all. The host is built from the provider, region and
  * account id, and has to be the provider's own (Provider::is_own_endpoint())
- * or the connection is refused. MinIO and "Other" need a typed host, so they
- * can never be a Connection; for your own MinIO, build a Bucket directly.
+ * or the connection is refused. MinIO and "Other" need a typed host, so by
+ * default they can never be a Connection.
+ *
+ * The exception is a host the operator typed: an install's own MinIO, or an
+ * S3-compatible service named in its configuration. from_array() takes one
+ * for MinIO and Other only when the caller says the input is the operator's
+ * (its third argument), so a form a user fills in cannot open that door by
+ * listing those providers.
  *
  * Shown only through masked(), so a page that saved the keys never gets them
  * back, and kept out of var_dump(), print_r() and json_encode() the same way.
@@ -51,6 +57,15 @@ final readonly class Connection implements \JsonSerializable {
 	public const array PROVIDERS = array( 'r2', 'aws', 'backblaze', 'digitalocean', 'linode', 'wasabi', 'scaleway' );
 
 	/**
+	 * Providers whose endpoint is typed: the host is whoever typed it's to
+	 * choose. Accepted only when from_array() is told the input is the
+	 * operator's.
+	 *
+	 * @since 2.2.0
+	 */
+	public const array TYPED = array( 'minio', 'other' );
+
+	/**
 	 * @since 1.3.0
 	 *
 	 * @param Provider $provider   Who runs the bucket.
@@ -59,6 +74,8 @@ final readonly class Connection implements \JsonSerializable {
 	 * @param string   $secret_key Secret access key.
 	 * @param string   $region     Region, or '' for the provider's default.
 	 * @param string   $account_id Cloudflare account id, for R2 only.
+	 * @param string   $endpoint   Host, with a port if it needs one, for
+	 *                             MinIO and Other only. @since 2.2.0.
 	 */
 	public function __construct(
 		public Provider $provider,
@@ -67,6 +84,7 @@ final readonly class Connection implements \JsonSerializable {
 		#[\SensitiveParameter] public string $secret_key,
 		public string $region = '',
 		public string $account_id = '',
+		public string $endpoint = '',
 	) {}
 
 	/**
@@ -74,24 +92,32 @@ final readonly class Connection implements \JsonSerializable {
 	 *
 	 * Every field is trimmed; the bucket, region and account id are lower-
 	 * cased, and the account id is dropped for a provider that has none.
+	 * The endpoint is kept only for MinIO and Other, lowercased, with any
+	 * scheme, path or trailing slash pasted from a dashboard taken off.
 	 *
 	 * @since 1.3.0
+	 * @since 2.2.0 The endpoint field, and $operator.
 	 *
 	 * @param array<string, mixed> $input     Fields: provider, bucket,
 	 *                                        access_key, secret_key, region,
-	 *                                        account_id. Anything not a
-	 *                                        string counts as empty.
+	 *                                        account_id, endpoint. Anything
+	 *                                        not a string counts as empty.
 	 * @param array<int, string>   $providers Provider values that may be
 	 *                                        chosen. Only those in PROVIDERS
-	 *                                        can be: a provider with a typed
-	 *                                        endpoint is never accepted.
+	 *                                        can be, and those in TYPED too
+	 *                                        when $operator is true.
+	 * @param bool                 $operator  Whether the input is the
+	 *                                        operator's own configuration,
+	 *                                        not something a user typed. Only
+	 *                                        then may the host be typed.
 	 *
 	 * @return self|string The connection, or a sentence saying what to fix.
 	 */
-	public static function from_array( array $input, array $providers = self::PROVIDERS ): self|string {
+	public static function from_array( array $input, array $providers = self::PROVIDERS, bool $operator = false ): self|string {
 		$field    = static fn ( string $name ): string => trim( (string) ( is_scalar( $input[ $name ] ?? null ) ? $input[ $name ] : '' ) );
 		$chosen   = $field( 'provider' );
-		$provider = in_array( $chosen, $providers, true ) && in_array( $chosen, self::PROVIDERS, true ) ? Provider::from( $chosen ) : null;
+		$possible = $operator ? array( ...self::PROVIDERS, ...self::TYPED ) : self::PROVIDERS;
+		$provider = in_array( $chosen, $providers, true ) && in_array( $chosen, $possible, true ) ? Provider::from( $chosen ) : null;
 
 		if ( null === $provider ) {
 			return 'Choose who runs your bucket.';
@@ -104,6 +130,7 @@ final readonly class Connection implements \JsonSerializable {
 			$field( 'secret_key' ),
 			strtolower( $field( 'region' ) ),
 			$provider->needs_account_id() ? strtolower( $field( 'account_id' ) ) : '',
+			$provider->needs_endpoint() ? self::bare_host( $field( 'endpoint' ) ) : '',
 		);
 
 		return $connection->problem() ?: $connection;
@@ -114,14 +141,18 @@ final readonly class Connection implements \JsonSerializable {
 	 * one — or no longer passes, because the rules got stricter since.
 	 *
 	 * @since 1.3.0
+	 * @since 2.2.0 $operator.
 	 *
 	 * @param string             $json      What to_json() wrote, already
 	 *                                      decrypted if it was stored sealed.
 	 * @param array<int, string> $providers As for from_array().
+	 * @param bool               $operator  As for from_array(): a stored
+	 *                                      MinIO or Other connection reads
+	 *                                      back only with it.
 	 *
 	 * @return self|null
 	 */
-	public static function from_json( string $json, array $providers = self::PROVIDERS ): ?self {
+	public static function from_json( string $json, array $providers = self::PROVIDERS, bool $operator = false ): ?self {
 		$data = json_decode( $json, true );
 
 		if ( ! is_array( $data ) ) {
@@ -130,7 +161,7 @@ final readonly class Connection implements \JsonSerializable {
 
 		// A JSON list, or an object with numeric names, decodes to integer
 		// keys, and none of those is a field.
-		$connection = self::from_array( array_filter( $data, 'is_string', ARRAY_FILTER_USE_KEY ), $providers );
+		$connection = self::from_array( array_filter( $data, 'is_string', ARRAY_FILTER_USE_KEY ), $providers, $operator );
 
 		return $connection instanceof self ? $connection : null;
 	}
@@ -139,40 +170,59 @@ final readonly class Connection implements \JsonSerializable {
 	 * The document to store. It holds the secret: seal it before it is
 	 * written anywhere.
 	 *
+	 * The endpoint is written only when there is one, so a connection
+	 * stored before it existed and the same one stored now are the same
+	 * document.
+	 *
 	 * @since 1.3.0
 	 *
 	 * @return string JSON.
 	 */
 	public function to_json(): string {
-		return (string) json_encode( array(
+		$document = array(
 			'provider'   => $this->provider->value,
 			'bucket'     => $this->bucket,
 			'access_key' => $this->access_key,
 			'secret_key' => $this->secret_key,
 			'region'     => $this->region,
 			'account_id' => $this->account_id,
-		) );
+		);
+
+		if ( '' !== $this->endpoint ) {
+			$document['endpoint'] = $this->endpoint;
+		}
+
+		return (string) json_encode( $document );
 	}
 
 	/**
 	 * Why this connection cannot be used, or ''.
 	 *
+	 * A typed endpoint is checked for shape only — a host name and an
+	 * optional port, nothing the signer would have to cut off — since there
+	 * is no official host to hold it to. Who may type one is from_array()'s
+	 * question, not this one's.
+	 *
 	 * @since 1.3.0
+	 * @since 2.2.0 Checks the endpoint.
 	 *
 	 * @return string A sentence for the person who typed it.
 	 */
 	public function problem(): string {
 		$printable = static fn ( string $value ): bool => 1 === preg_match( '/^[\x21-\x7E]{1,256}$/', $value );
+		$typed     = $this->provider->needs_endpoint();
 
 		return match ( true ) {
-			! in_array( $this->provider->value, self::PROVIDERS, true ) => $this->provider->label() . ' cannot be connected this way: its address would have to be typed.',
+			$typed && '' === $this->endpoint => $this->provider->label() . ' cannot be connected without an address: it has to be typed, as the endpoint.',
+			$typed && ! self::is_host( $this->endpoint ) => 'An endpoint is a host name, with a port if it needs one, like minio.example.com:9000.',
+			! $typed && '' !== $this->endpoint => $this->provider->label() . ' builds its own address: leave the endpoint empty.',
 			! AddressingStyle::is_valid_bucket( $this->bucket ) => 'A bucket name is 3 to 63 lowercase letters, numbers, dots and hyphens.',
 			AddressingStyle::VirtualHosted === $this->provider->addressing() && ! AddressingStyle::is_dns_compatible( $this->bucket ) => $this->provider->label() . ' needs a bucket name without dots.',
 			! $printable( $this->access_key ) => 'Paste the access key id, without spaces.',
 			! $printable( $this->secret_key ) => 'Paste the secret access key, without spaces.',
 			1 !== preg_match( '/^[a-z0-9\-]{0,40}$/', $this->region ) => 'A region is letters, numbers and hyphens, like eu-west-2.',
 			$this->provider->needs_account_id() && 1 !== preg_match( '/^[a-z0-9]{8,64}$/', $this->account_id ) => 'Paste your Cloudflare account id: the 32 characters in your R2 endpoint address.',
-			! $this->provider->is_own_endpoint( $this->host() ) => 'That region does not give an address at ' . $this->provider->label() . '. Check the region.',
+			! $typed && ! $this->provider->is_own_endpoint( $this->host() ) => 'That region does not give an address at ' . $this->provider->label() . '. Check the region.',
 			default => '',
 		};
 	}
@@ -185,7 +235,7 @@ final readonly class Connection implements \JsonSerializable {
 	 * @return Signer
 	 */
 	public function signer(): Signer {
-		return $this->provider->signer( $this->access_key, $this->secret_key, $this->region, $this->account_id );
+		return $this->provider->signer( $this->access_key, $this->secret_key, $this->region, $this->account_id, $this->endpoint );
 	}
 
 	/**
@@ -203,7 +253,8 @@ final readonly class Connection implements \JsonSerializable {
 	}
 
 	/**
-	 * The endpoint host, built from the provider, region and account id.
+	 * The endpoint host, built from the provider, region and account id, or
+	 * the endpoint as typed for MinIO and Other.
 	 *
 	 * @since 1.3.0
 	 *
@@ -211,7 +262,7 @@ final readonly class Connection implements \JsonSerializable {
 	 */
 	public function host(): string {
 		try {
-			return $this->provider->endpoint( $this->region, $this->account_id );
+			return $this->provider->endpoint( $this->region, $this->account_id, $this->endpoint );
 		} catch ( \InvalidArgumentException ) {
 			return '';
 		}
@@ -250,7 +301,8 @@ final readonly class Connection implements \JsonSerializable {
 	 *
 	 * The secret is never shown at all, not even masked: there is nothing
 	 * anybody does with half a secret. An account id in the host is masked;
-	 * a host built from a region says nothing the region does not.
+	 * a host built from a region says nothing the region does not, and a
+	 * typed endpoint is the operator's own, shown so they can recognise it.
 	 *
 	 * @since 1.3.0
 	 *
@@ -311,6 +363,45 @@ final readonly class Connection implements \JsonSerializable {
 	#[\Override]
 	public function jsonSerialize(): array {
 		return $this->masked();
+	}
+
+	/**
+	 * An endpoint as pasted, cut down to the host and port.
+	 *
+	 * The same trimming the signer does to an endpoint, done on the way in
+	 * so that what is stored, compared and shown is what is signed for.
+	 *
+	 * @since 2.2.0
+	 *
+	 * @param string $endpoint What was typed, e.g. `https://MinIO.local:9000/`.
+	 *
+	 * @return string e.g. `minio.local:9000`.
+	 */
+	private static function bare_host( string $endpoint ): string {
+		$host = (string) preg_replace( '#^[a-z][a-z0-9+.\-]*://#i', '', trim( $endpoint ) );
+
+		return strtolower( rtrim( explode( '/', $host, 2 )[0], '.' ) );
+	}
+
+	/**
+	 * Whether an endpoint is a host name, with an optional port and nothing
+	 * else: no user, path, query or bracketed address, which the signer
+	 * cannot sign for.
+	 *
+	 * @since 2.2.0
+	 *
+	 * @param string $endpoint Endpoint, as bare_host() leaves it.
+	 *
+	 * @return bool
+	 */
+	private static function is_host( string $endpoint ): bool {
+		$label = '[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?';
+
+		if ( strlen( $endpoint ) > 259 || 1 !== preg_match( '/^' . $label . '(?:\.' . $label . ')*(?::(\d{1,5}))?$/', $endpoint, $match ) ) {
+			return false;
+		}
+
+		return ! isset( $match[1] ) || ( (int) $match[1] >= 1 && (int) $match[1] <= 65535 );
 	}
 
 	/**

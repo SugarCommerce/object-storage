@@ -103,6 +103,141 @@ final class ConnectionTest extends TestCase {
 		$this->assertStringContainsString( 'typed', ( new Connection( Provider::MinIO, 'files', 'k', 's' ) )->problem() );
 	}
 
+	/* ─── A host the operator typed ─────────────────────────────────── */
+
+	/**
+	 * What an operator puts in their own configuration for their own MinIO.
+	 */
+	public const array OPERATOR = array(
+		'provider'   => 'minio',
+		'endpoint'   => 'https://MinIO.Internal.example:9000/',
+		'bucket'     => 'media',
+		'access_key' => 'MINIOACCESSKEY01',
+		'secret_key' => 'minio-secret-that-must-never-be-shown',
+	);
+
+	/**
+	 * The operator's fields, with some changed, taken as the operator's.
+	 *
+	 * @param array<string, string> $changes Fields to replace.
+	 */
+	private static function configured( array $changes = array() ): Connection|string {
+		return Connection::from_array( $changes + self::OPERATOR, array( ...Connection::PROVIDERS, ...Connection::TYPED ), true );
+	}
+
+	public function test_an_operator_can_name_their_own_host(): void {
+		$connection = self::configured();
+
+		$this->assertInstanceOf( Connection::class, $connection );
+		$this->assertSame( Provider::MinIO, $connection->provider );
+		$this->assertSame( 'minio.internal.example:9000', $connection->endpoint, 'Scheme, slash and case taken off, as the signer would.' );
+		$this->assertSame( 'minio.internal.example:9000', $connection->host() );
+		$this->assertSame( 'https://minio.internal.example:9000', $connection->origin() );
+		$this->assertSame( '', $connection->problem() );
+	}
+
+	public function test_the_bucket_goes_to_the_typed_host(): void {
+		$http = new Fake();
+		$this->assertInstanceOf( Connection::class, $connection = self::configured() );
+
+		(void) $connection->bucket( $http )->delete( 'k' );
+
+		$this->assertStringStartsWith( 'https://minio.internal.example:9000/media/k', $http->sent( 'DELETE' )[0]['url'] );
+	}
+
+	/**
+	 * Listing MinIO is not enough: the caller has to say the input is the
+	 * operator's, so a form whose providers came from Provider::options()
+	 * does not start taking hosts.
+	 */
+	public function test_a_typed_host_needs_the_operator_flag_as_well(): void {
+		$all = array( ...Connection::PROVIDERS, ...Connection::TYPED );
+
+		$this->assertIsString( Connection::from_array( self::OPERATOR, $all ) );
+		$this->assertIsString( Connection::from_array( self::OPERATOR, Connection::PROVIDERS, true ), 'Nor is the flag enough without the provider.' );
+	}
+
+	/**
+	 * @param array<string, string> $changes  Fields to replace.
+	 * @param string                $mentions What the sentence mentions.
+	 */
+	#[DataProvider( 'unusable_hosts' )]
+	public function test_an_unusable_typed_host_is_refused( array $changes, string $mentions ): void {
+		$result = self::configured( $changes );
+
+		$this->assertIsString( $result );
+		$this->assertStringContainsStringIgnoringCase( $mentions, $result );
+	}
+
+	/**
+	 * @return array<string, array{0: array<string, string>, 1: string}>
+	 */
+	public static function unusable_hosts(): array {
+		return array(
+			'none'          => array( array( 'endpoint' => '' ), 'typed' ),
+			'just a scheme' => array( array( 'endpoint' => 'https://' ), 'typed' ),
+			'a user'        => array( array( 'endpoint' => 'admin@minio.local' ), 'host name' ),
+			'a query'       => array( array( 'endpoint' => 'minio.local?x=1' ), 'host name' ),
+			'port too big'  => array( array( 'endpoint' => 'minio.local:70000' ), 'host name' ),
+			'port zero'     => array( array( 'endpoint' => 'minio.local:0' ), 'host name' ),
+			'ipv6'          => array( array( 'endpoint' => '[::1]:9000' ), 'host name' ),
+			'empty label'   => array( array( 'endpoint' => 'minio..local' ), 'host name' ),
+			'space'         => array( array( 'endpoint' => 'minio local' ), 'host name' ),
+		);
+	}
+
+	/**
+	 * A provider that builds its own host never takes a typed one, even from
+	 * the operator: the field is dropped, and a direct construction with one
+	 * is refused.
+	 */
+	public function test_a_built_host_ignores_a_typed_one(): void {
+		$connection = Connection::from_array( array( 'endpoint' => 'evil.example' ) + self::TYPED, Connection::PROVIDERS, true );
+
+		$this->assertInstanceOf( Connection::class, $connection );
+		$this->assertSame( '', $connection->endpoint );
+		$this->assertStringContainsString( 'leave the endpoint empty', ( new Connection( Provider::Aws, 'files', 'k', 's', endpoint: 'evil.example' ) )->problem() );
+	}
+
+	public function test_a_typed_host_survives_storing(): void {
+		$this->assertInstanceOf( Connection::class, $connection = self::configured() );
+
+		$all      = array( ...Connection::PROVIDERS, ...Connection::TYPED );
+		$restored = Connection::from_json( $connection->to_json(), $all, true );
+
+		$this->assertNotNull( $restored );
+		$this->assertSame( 'minio.internal.example:9000', $restored->endpoint );
+		$this->assertTrue( $connection->same_bucket( $restored ) );
+		$this->assertNull( Connection::from_json( $connection->to_json(), $all ), 'Read back as a user\'s, it is refused.' );
+	}
+
+	/**
+	 * A connection with no endpoint stores exactly what it did before there
+	 * was one, so nothing already sealed needs writing again.
+	 */
+	public function test_a_built_host_stores_no_endpoint(): void {
+		$this->assertInstanceOf( Connection::class, $connection = self::typed() );
+		$this->assertArrayNotHasKey( 'endpoint', (array) json_decode( $connection->to_json(), true ) );
+	}
+
+	public function test_two_typed_hosts_are_two_buckets(): void {
+		$this->assertInstanceOf( Connection::class, $one = self::configured() );
+		$this->assertInstanceOf( Connection::class, $two = self::configured( array( 'endpoint' => 'minio.internal.example:9001' ) ) );
+		$this->assertFalse( $one->same_bucket( $two ) );
+	}
+
+	public function test_the_masked_form_shows_a_typed_host_but_no_secret(): void {
+		$this->assertInstanceOf( Connection::class, $connection = self::configured() );
+
+		$masked = $connection->masked();
+		$shown  = (string) json_encode( $connection );
+
+		$this->assertSame( 'minio.internal.example:9000', $masked['host'] );
+		$this->assertSame( Provider::MinIO->label(), $masked['label'] );
+		$this->assertStringNotContainsString( self::OPERATOR['secret_key'], $shown );
+		$this->assertStringNotContainsString( self::OPERATOR['access_key'], $shown );
+	}
+
 	/**
 	 * @param array<string, string> $changes Fields to replace.
 	 * @param string                $origin  Where it reaches.

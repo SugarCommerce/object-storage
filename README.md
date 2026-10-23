@@ -17,7 +17,7 @@ A small client for one S3-compatible bucket — R2, S3, B2, MinIO: multipart upl
 - 🗄️ **Big files from the server** — `upload_file()` sends a file from disk a part at a time, and aborts what it started if a part is refused.
 - ⏯️ **Resuming** — `parts()` asks storage which parts it really kept (ListParts, every page), rather than trusting the browser's memory.
 - 🔎 **Has it changed?** — `stat()` reads an object's ETag, length and modification time from a one-byte read, for objects somebody else can overwrite.
-- 🔑 **Bring-your-own buckets** — `Connection` takes a user's provider, region and keys, refuses any host that is not the provider's own, and only ever shows itself masked.
+- 🔑 **Bring-your-own buckets** — `Connection` takes a user's provider, region and keys, refuses any host that is not the provider's own (unless the operator typed it), and only ever shows itself masked.
 - 🩺 **A connection test** — `Probe` reaches, writes, reads back, deletes and checks CORS with a tiny object, and says which step failed and why, as codes you word.
 - 📏 **The real size** — from a one-byte ranged read's `Content-Range`.
 - 🔍 **Ranged reads** — throwing on failure, because an empty read and an empty file look alike.
@@ -129,7 +129,24 @@ $bucket = $connection->bucket( new Client() );       // keep the SSRF guard
 $page   = $connection->masked();                     // all a page ever gets
 ```
 
-There is **no endpoint field**. Every request — uploads, reading a file back to scan it, a download proxy — goes to the endpoint host, and a host the user could type is one they control: pointed at your network, or a server that shows your scanner one file and everybody else another. The host is built from the provider, region and account id and must be the provider's own (`Provider::is_own_endpoint()`), so MinIO and "Other" can never be a `Connection`. `masked()` never includes the secret, and `var_dump()` / `print_r()` show only the masked form.
+There is **no endpoint field**. Every request — uploads, reading a file back to scan it, a download proxy — goes to the endpoint host, and a host the user could type is one they control: pointed at your network, or a server that shows your scanner one file and everybody else another. The host is built from the provider, region and account id and must be the provider's own (`Provider::is_own_endpoint()`), so by default MinIO and "Other" can never be a `Connection`. `masked()` never includes the secret, and `var_dump()` / `print_r()` show only the masked form.
+
+#### A host the operator typed
+
+An install's own MinIO, or an S3-compatible service named in its configuration, has a host somebody typed — the operator, which is a different thing from a user. Say so, and allow the providers in `Connection::TYPED`:
+
+```php
+$connection = Connection::from_array(
+    [ 'provider' => 'minio', 'endpoint' => getenv( 'STORAGE_ENDPOINT' ), 'bucket' => 'media', /* keys */ ],
+    [ ...Connection::PROVIDERS, ...Connection::TYPED ],
+    true,   // the operator's own configuration
+);
+
+$connection->endpoint;   // 'minio.internal:9000' — scheme, path and case taken off
+$stored = Connection::from_json( $json, [ ...Connection::PROVIDERS, ...Connection::TYPED ], true );
+```
+
+Both are needed: listing `minio` without the flag is still refused, so a form whose providers came from `Provider::options()` does not start taking hosts. The endpoint must be a host name with an optional port (1–65535) — no user, path, query or IPv6 brackets, which the signer cannot sign for — and a provider that builds its own host never keeps one. `to_json()` writes `endpoint` only when there is one, so a connection stored before 2.2.0 is the same document today. The HTTP client's SSRF guard still applies: a MinIO on a private address needs a client whose policy allows it.
 
 ### Testing a connection
 
@@ -156,7 +173,7 @@ composer install
 composer test
 ```
 
-92 tests, every one against `sugarcommerce/http-client`'s `Fake`, so nothing reaches a bucket: multipart start, sign, finish (including the error inside a 200), abort, server-side `upload_file()` in one PUT or in parts, ListParts paging and its dead ends, ranged reads, sizes, `stat()`, CORS, copies, view and stream URLs, `Connection` validation, storage and masking, and every `Probe` step and fault. `MustCheckTest` keeps `#[\NoDiscard]` on the results that must be checked.
+116 tests, every one against `sugarcommerce/http-client`'s `Fake`, so nothing reaches a bucket: multipart start, sign, finish (including the error inside a 200), abort, server-side `upload_file()` in one PUT or in parts, ListParts paging and its dead ends, ranged reads, sizes, `stat()`, CORS, copies, view and stream URLs, `Connection` validation, typed operator endpoints, storage and masking, and every `Probe` step and fault. `MustCheckTest` keeps `#[\NoDiscard]` on the results that must be checked.
 
 ## License
 
