@@ -14,7 +14,8 @@ A small client for one S3-compatible bucket — R2, S3, B2, MinIO: multipart upl
 ## Features
 
 - 📤 **Browser-direct multipart** — start, sign parts in batches, finish, abort.
-- 🗄️ **Big files from the server** — `upload_file()` sends a file from disk a part at a time, and aborts what it started if a part is refused.
+- 🗄️ **Big files from the server** — `upload_file()` sends a file from disk a part at a time, and aborts what it started if a part is refused; `download_file()` brings one back to disk as it arrives, keeping it only when it is whole.
+- 📦 **Off-site copies** — `Archive` sends a backup to the bucket through a seal hook you supply, lists what it sent (no bucket listing needed), keeps the newest N, and fetches one back without ever overwriting a file it was not told to.
 - ⏯️ **Resuming** — `parts()` asks storage which parts it really kept (ListParts, every page), rather than trusting the browser's memory.
 - 🔎 **Has it changed?** — `stat()` reads an object's ETag, length and modification time from a one-byte read, for objects somebody else can overwrite.
 - 🔑 **Bring-your-own buckets** — `Connection` takes a user's provider, region and keys, refuses any host that is not the provider's own (unless the operator typed it), and only ever shows itself masked.
@@ -82,6 +83,27 @@ if ( ! $bucket->upload_file( 'backups/' . basename( $path ), $path, 'application
 ```
 
 For what the server itself has to send and cannot hold — a database backup, an export. A file smaller than a part goes in one `put()`; anything larger is a multipart upload from the server, one part in memory at a time, sized by `part_size()`. A part refused, or returned without an ETag, aborts the upload, because its parts would otherwise be billed until a lifecycle rule found them.
+
+### Off-site copies
+
+```php
+use SugarCommerce\ObjectStorage\Archive;
+
+$archive = new Archive( $bucket, '/var/backups/app/remote.json', 'backups/', keep: 14,
+    seal: $sealer->seal_file( ... ),   // seal file A into file B
+    open: $sealer->open_file( ... ) ); // open file B back into file A
+
+$key     = $archive->send( $backups->take() );        // 'backups/app-20261024-030000.db.sealed', or null
+$deleted = $archive->prune();                          // all but the newest 14, by the order sent
+$archive->keys();                                      // newest first
+$archive->fetch( $key, '/var/backups/app/restored.db' );                 // false: missing, or will not open
+Archive::restore( $downloaded, $out, $sealer->open_file( ... ) );        // a copy already on disk
+$archive->capture( $db->snapshot( ... ), 'app-' . gmdate( 'Ymd-His' ) . '.db' ); // write, send, remove
+```
+
+The bookkeeping half of an off-site backup. What was sent goes in a JSON list beside the local copies once storage has it, so keys that cannot list the bucket can still prune it; a failed upload leaves the list as it was, and a failed delete stays listed and is tried again. A list that does not parse, or names a key outside the prefix, throws and is left alone: a fresh one would forget every copy already in the bucket, and a list naming any key would have `prune()` delete it.
+
+Sealing is the two hooks, so whether it streams or reads a file whole is the hook's business. Each is called `( $from, $to )` with `$to` an empty owner-only file; false means it failed, anything else (void included) that it worked. Without hooks a copy goes up as it is. The sealed copy, a captured copy, a download and a half-opened restore are temporary files, removed on every way out, exceptions included. A restore is opened beside its target, made owner-only and linked into place, so a copy that will not open leaves nothing, and a target that exists throws unless `overwrite: true`. `fetch()` takes any key under the prefix, listed or not, since the server that kept the list may be what was lost.
 
 ### Resuming an upload
 
@@ -173,7 +195,7 @@ composer install
 composer test
 ```
 
-116 tests, every one against `sugarcommerce/http-client`'s `Fake`, so nothing reaches a bucket: multipart start, sign, finish (including the error inside a 200), abort, server-side `upload_file()` in one PUT or in parts, ListParts paging and its dead ends, ranged reads, sizes, `stat()`, CORS, copies, view and stream URLs, `Connection` validation, typed operator endpoints, storage and masking, and every `Probe` step and fault. `MustCheckTest` keeps `#[\NoDiscard]` on the results that must be checked.
+154 tests, every one against `sugarcommerce/http-client`'s `Fake`, so nothing reaches a bucket: multipart start, sign, finish (including the error inside a 200), abort, server-side `upload_file()` in one PUT or in parts, `download_file()` whole or not at all, `Archive` sending, sealing, pruning, a corrupt or tampered list, fetching and refusing to overwrite, ListParts paging and its dead ends, ranged reads, sizes, `stat()`, CORS, copies, view and stream URLs, `Connection` validation, typed operator endpoints, storage and masking, and every `Probe` step and fault. `MustCheckTest` keeps `#[\NoDiscard]` on the results that must be checked.
 
 ## License
 

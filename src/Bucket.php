@@ -538,6 +538,70 @@ final readonly class Bucket {
 	}
 
 	/**
+	 * Read an object into a file on disk, as it arrives.
+	 *
+	 * The way back for upload_file(): a database backup, an export, too big
+	 * to hold, so the body goes to the file a chunk at a time and is never in
+	 * memory whole. The file is created, never replaced, so a download cannot
+	 * land on top of the file it was meant to sit beside. Anything short of
+	 * the whole object — a refusal, a transfer cut off, a disk that filled,
+	 * fewer bytes than the Content-Length promised — removes what was
+	 * written, rather than leaving a file that looks like a download.
+	 *
+	 * @since 2.3.0
+	 *
+	 * @param string $key  Object key.
+	 * @param string $path Where to write it. Must not exist.
+	 *
+	 * @return bool True when the file holds the whole object.
+	 *
+	 * @throws \RuntimeException When the file exists, or cannot be created.
+	 */
+	#[\NoDiscard( 'False means nothing was kept.' )]
+	public function download_file( string $key, string $path ): bool {
+		if ( file_exists( $path ) || is_link( $path ) ) {
+			throw new \RuntimeException( 'A download will not overwrite ' . $path );
+		}
+
+		$handle = @fopen( $path, 'xb' );
+
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'Cannot create ' . $path );
+		}
+
+		$written = 0;
+		$failed  = false;
+		$kept    = false;
+
+		try {
+			$response = $this->http->stream(
+				$this->url( $key, 300 ),
+				static function ( string $chunk ) use ( $handle, &$written, &$failed ): void {
+					// One short write and the file is not the object; the rest
+					// of the transfer is let go rather than written after a gap.
+					if ( ! $failed && strlen( $chunk ) === fwrite( $handle, $chunk ) ) {
+						$written += strlen( $chunk );
+					} else {
+						$failed = true;
+					}
+				}
+			);
+
+			$length = $response->header( 'content-length' );
+			$kept   = $response->ok && ! $failed && fflush( $handle )
+				&& ( null === $length || ! ctype_digit( $length ) || (int) $length === $written );
+
+			return $kept;
+		} finally {
+			fclose( $handle );
+
+			if ( ! $kept ) {
+				@unlink( $path );
+			}
+		}
+	}
+
+	/**
 	 * Copy an object from another bucket into this one, inside storage.
 	 *
 	 * Nothing passes through PHP, whatever the size. Both buckets must be

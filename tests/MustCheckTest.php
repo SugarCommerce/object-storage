@@ -28,7 +28,7 @@ final class MustCheckTest extends TestCase {
 	 * @return array<string, array{string}>
 	 */
 	public static function methods(): array {
-		return array_combine( array( 'start_upload', 'finish_upload', 'abort_upload', 'put', 'upload_file', 'copy_from', 'delete' ), array_map( static fn ( string $m ): array => array( $m ), array( 'start_upload', 'finish_upload', 'abort_upload', 'put', 'upload_file', 'copy_from', 'delete' ) ) );
+		return array_combine( array( 'start_upload', 'finish_upload', 'abort_upload', 'put', 'upload_file', 'download_file', 'copy_from', 'delete' ), array_map( static fn ( string $m ): array => array( $m ), array( 'start_upload', 'finish_upload', 'abort_upload', 'put', 'upload_file', 'download_file', 'copy_from', 'delete' ) ) );
 	}
 
 	#[DataProvider( 'methods' )]

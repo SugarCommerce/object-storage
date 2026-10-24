@@ -1,6 +1,6 @@
 {
   "name": "sugarcommerce/object-storage",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "A small client for one S3-compatible bucket — R2, S3, B2, MinIO: multipart uploads the browser does directly, ranged reads, the real stored size, presigned downloads and the bucket's CORS policy. Built on sugarcommerce/s3-signer and sugarcommerce/http-client.",
   "type": "library",
   "license": "GPL-2.0-or-later",
@@ -9,7 +9,7 @@
   "keywords": ["s3", "r2", "object-storage", "multipart", "presigned", "cors"],
   "require": {
     "php": ">=8.5",
-    "sugarcommerce/http-client": "^1.0",
+    "sugarcommerce/http-client": "^1.4",
     "sugarcommerce/s3-signer": "^1.3",
     "sugarcommerce/sanitize": "^1.3"
   },

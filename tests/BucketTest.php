@@ -435,4 +435,65 @@ final class BucketTest extends TestCase {
 		$this->assertFalse( $this->bucket( $http )->upload_file( 'k', '/nonexistent/' . bin2hex( random_bytes( 4 ) ) ) );
 		$this->assertSame( array(), $http->methods() );
 	}
+
+	/* ─── A file to disk (2.3.0) ────────────────────────────────────── */
+
+	/**
+	 * A path for a download, removed after the test.
+	 */
+	private function target(): string {
+		$path = sys_get_temp_dir() . '/os-download-' . bin2hex( random_bytes( 4 ) );
+
+		register_shutdown_function( static fn () => @unlink( $path ) );
+
+		return $path;
+	}
+
+	public function test_a_download_is_written_to_the_file(): void {
+		$http = $this->scripted( new Response( true, 200, str_repeat( 'd', Fake::CHUNK * 3 + 5 ), headers: array( 'content-length' => (string) ( Fake::CHUNK * 3 + 5 ) ) ) );
+		$path = $this->target();
+
+		$this->assertTrue( $this->bucket( $http )->download_file( 'backups/a.db', $path ) );
+		$this->assertSame( Fake::CHUNK * 3 + 5, filesize( $path ) );
+		$this->assertStringContainsString( '/files/backups/a.db?', $http->sent( 'GET' )[0]['url'] );
+	}
+
+	/**
+	 * Only the whole object counts: anything less is not left looking like
+	 * a download.
+	 *
+	 * @param Response $answer What storage sends.
+	 */
+	#[DataProvider( 'short_downloads' )]
+	public function test_a_download_that_is_not_the_whole_object_leaves_nothing( Response $answer ): void {
+		$path = $this->target();
+
+		$this->assertFalse( $this->bucket( $this->scripted( $answer ) )->download_file( 'backups/a.db', $path ) );
+		$this->assertFileDoesNotExist( $path );
+	}
+
+	/**
+	 * @return array<string, array{0: Response}>
+	 */
+	public static function short_downloads(): array {
+		return array(
+			'refused'    => array( new Response( false, 404, '<Error><Code>NoSuchKey</Code></Error>' ) ),
+			'cut short'  => array( new Response( true, 200, 'abc', headers: array( 'content-length' => '10' ) ) ),
+		);
+	}
+
+	public function test_a_download_will_not_overwrite_a_file(): void {
+		$http = $this->scripted();
+		$path = $this->target();
+
+		file_put_contents( $path, 'already here' );
+
+		try {
+			(void) $this->bucket( $http )->download_file( 'backups/a.db', $path );
+			$this->fail( 'Overwrote a file.' );
+		} catch ( \RuntimeException ) {
+			$this->assertSame( 'already here', file_get_contents( $path ) );
+			$this->assertSame( array(), $http->methods() );
+		}
+	}
 }
